@@ -38,8 +38,8 @@ All steps are executed in a **Linux terminal environment**.
 
 Edit the following variables at the top of the script:
 
-- `GENE` – gene name, symbol or ID (e.g., SRC) 
-- `TAXON` – Taxonomic group (birds or reptiles) eg. Psittaciformes, Testudinata, or Crocodylia
+- `GENE_NAME, GENE_SYMBOL` – Gene details (e.g. SRC) 
+- `ORTHOLOG_GROUP` – Taxonomic group (birds or reptiles) eg. Psittaciformes, Testudinata, or Crocodylia
 
 Run the pipeline:
 

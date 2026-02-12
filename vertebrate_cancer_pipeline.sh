@@ -2,48 +2,56 @@
 # Vertebrate Cancer Analysis Pipeline
 # Comparative analysis of orthologous genes in birds and reptiles
 # Detecting signatures of positive selection using HyPhy
-# Originally developed for birds (Psittaciformes) and reptiles (Testudinata, Crocodylia) 
+# Originally developed for birds (Psittaciformes) and reptiles (Testudinata, Crocodylia)
 
-# USER-DEFINED PARAMETERS 
+set -e  # Stop on error
 
-# Gene information
-GENE_NAME="SRC"                 # e.g. SRC, ATF3
-GENE_SYMBOL="src"               # lowercase gene symbol
-GENE_ID="101939025"             # only used if needed
+# USER-DEFINED PARAMETERS (you can pass them as arguments: ./script.sh SRC src Psittaciformes)
+GENE_NAME="${1:-ATF3}"                 # e.g. SRC, ATF3
+GENE_SYMBOL="${2:-atf3}"               # lowercase gene symbol e.g. atf3
+GENE_ID="${3:-101939025}"             # only if needed (OPTIONAL) e.g. 101939025
+ORTHOLOG_GROUP="${4:-testudinata,crocodylia}" # e.g. Psittaciformes or testudinata,crocodylia
 
-# Taxa options:
-# Birds: Psittaciformes
-# Reptiles: testudinata,crocodylia
-ORTHOLOG_GROUP="Psittaciformes"   # change to testudinata,crocodylia for reptiles
+# Configurable directories (change these if necessary)
+BASE_DIR="${HOME}/vertebrate_cancer"  # Base directory (adjust to your preference)
+WORKDIR="${BASE_DIR}/${GENE_NAME}_${ORTHOLOG_GROUP}"
+RESULTS="${BASE_DIR}/Results/${GENE_NAME}_${ORTHOLOG_GROUP}"
 
-# Working directories
-WORKDIR="$HOME/vertebrate_cancer/${GENE_NAME}_${ORTHOLOG_GROUP}"
-RESULTS="$HOME/Results/${GENE_NAME}_${ORTHOLOG_GROUP}"
 
-# LOAD CONDA
-source /home/manager/anaconda3/etc/profile.d/conda.sh
+# LOAD CONDA - Try multiple common paths if the first doesn't work
+POSSIBLE_CONDA_PATHS=("${HOME}/miniconda3" "${HOME}/anaconda3" "/opt/miniconda3" "/opt/anaconda3")
+CONDA_SOURCED=false
 
-mkdir -p ${WORKDIR}
-mkdir -p ${RESULTS}
-cd ${WORKDIR}
+for CONDA_PATH in "${POSSIBLE_CONDA_PATHS[@]}"; do
+    if [ -f "${CONDA_PATH}/etc/profile.d/conda.sh" ]; then
+        source "${CONDA_PATH}/etc/profile.d/conda.sh"
+        CONDA_SOURCED=true
+        echo "Conda sourced from: ${CONDA_PATH}"
+        break
+    fi
+done
+
+if [ "$CONDA_SOURCED" = false ]; then
+    echo "Error: Conda not found in common locations (${POSSIBLE_CONDA_PATHS[*]}). Install Miniconda/Anaconda and ensure it's in one of these paths, or add your path to POSSIBLE_CONDA_PATHS."
+    exit 1
+fi
+
+# Create directories
+mkdir -p "${WORKDIR}"
+mkdir -p "${RESULTS}"
+cd "${WORKDIR}"
+
+echo "Starting pipeline for ${GENE_NAME} in ${ORTHOLOG_GROUP}..."
 
 # 1. DOWNLOAD SEQUENCES
-conda activate ncbi_datasets
+conda activate ncbi_datasets || { echo "Error: Could not activate ncbi_datasets environment."; exit 1; }
 
-# Option A: download by gene symbol (used for birds)
-datasets download gene symbol ${GENE_SYMBOL} \
+datasets download gene symbol "${GENE_SYMBOL}" \
   --include cds \
-  --ortholog ${ORTHOLOG_GROUP} \
-  --filename ${GENE_NAME}.zip
+  --ortholog "${ORTHOLOG_GROUP}" \
+  --filename "${GENE_NAME}.zip"
 
-# Option B: download by gene ID (used if needed)
-# Uncomment if needed
-# datasets download gene gene-id ${GENE_ID} \
-#   --include cds \
-#   --ortholog ${ORTHOLOG_GROUP} \
-#   --filename ${GENE_NAME}.zip
-
-unzip ${GENE_NAME}.zip -d data
+unzip "${GENE_NAME}.zip" -d data
 tree data
 
 conda deactivate
@@ -54,21 +62,24 @@ find data/ncbi_dataset/data -type f ! -name "*.fna" -delete
 # 2. HEADER CLEANING
 cd data/ncbi_dataset/data
 # Standardize headers
-perl -pe 's/(>\w+_\d+\.\d)\:\d+\-\d+\s+.*organism\=(\w+)\s+(\w+)\]\s+.*/\1_\2\.\3/g' cds.fna > cds_clean.fna
+perl -pe 's/(>\w+_\d+\.\d)\:\d+\-\d+\s+.*organism\=(\w+)\s+(\w+)\$\s+.*/\1_\2\.\3/g' cds.fna > cds_clean.fna
 
 # 3. ALIGNMENT WITH MUSCLE
-muscle -in cds_clean.fna -out ${GENE_NAME}_aligned.afa
+if muscle -h 2>&1 | grep -q -- "-align"; then
+  muscle -align cds_clean.fna -output "${GENE_NAME}_aligned.afa"
+else
+  muscle -in cds_clean.fna -out "${GENE_NAME}_aligned.afa"
+fi
 
 # 4. CLEAN CODONS WITH HYPHY
-hyphy cln Universal ${GENE_NAME}_aligned.afa No/Yes ${GENE_NAME}_aligned_clean.afa
+hyphy cln Universal "${GENE_NAME}_aligned.afa" No/Yes "${GENE_NAME}_aligned_clean.afa"
 
 # 5. PHYLOGENETIC TREE (RAXML)
-
-conda activate phylogenetics
+conda activate phylogenetics || { echo "Error: Could not activate phylogenetics environment."; exit 1; }
 
 raxmlHPC \
-  -s ${GENE_NAME}_aligned_clean.afa \
-  -n ${GENE_NAME}_raxml \
+  -s "${GENE_NAME}_aligned_clean.afa" \
+  -n "${GENE_NAME}_raxml" \
   -m GTRCAT \
   -f a \
   -x 123 \
@@ -79,35 +90,31 @@ conda deactivate
 
 # Remove unnecessary RAxML files
 find . -type f \( -name "RAxML_bootstrap*" -o -name "RAxML_bipartitions*" \) -delete
-# 6. SELECTION ANALYSIS (HYPHY)
 
-# Notes:
-# - LIBPATH specifies HyPhy library directory
-# - Alignment file: codon alignment (from MUSCLE)
-# - Tree file: best phylogenetic tree (from RAxML)
-# - Output: results saved in JSON format
+# 6. SELECTION ANALYSIS (HYPHY)
+# Notes: Adjust LIBPATH if needed (e.g., to your Conda env)
+LIBPATH="${CONDA_PATH}/lib/hyphy"
 
 # aBSREL – branch selection
-hyphy LIBPATH=/home/manager/anaconda3/lib/hyphy absrel \
-  --alignment ${GENE_NAME}_aligned_clean.afa \
-  --tree RAxML_bestTree.${GENE_NAME}_raxml \
+hyphy LIBPATH="${LIBPATH}" absrel \
+  --alignment "${GENE_NAME}_aligned_clean.afa" \
+  --tree "RAxML_bestTree.${GENE_NAME}_raxml" \
   --branches All \
-  --output ${RESULTS}/${GENE_NAME}_aBSREL.json
+  --output "${RESULTS}/${GENE_NAME}_aBSREL.json"
 
 # MEME – site selection
-hyphy LIBPATH=/home/manager/anaconda3/lib/hyphy meme \
-  --alignment ${GENE_NAME}_aligned_clean.afa \
-  --tree RAxML_bestTree.${GENE_NAME}_raxml \
-  --output ${RESULTS}/${GENE_NAME}_MEME.json
+hyphy LIBPATH="${LIBPATH}" meme \
+  --alignment "${GENE_NAME}_aligned_clean.afa" \
+  --tree "RAxML_bestTree.${GENE_NAME}_raxml" \
+  --output "${RESULTS}/${GENE_NAME}_MEME.json"
 
-# BUSTED – gene-wide selection (used in reptiles)
-hyphy LIBPATH=/home/manager/anaconda3/lib/hyphy busted \
-  --alignment ${GENE_NAME}_aligned_clean.afa \
-  --tree RAxML_bestTree.${GENE_NAME}_raxml \
+# BUSTED – gene-wide selection
+hyphy LIBPATH="${LIBPATH}" busted \
+  --alignment "${GENE_NAME}_aligned_clean.afa" \
+  --tree "RAxML_bestTree.${GENE_NAME}_raxml" \
   --branches All \
-  --output ${RESULTS}/${GENE_NAME}_BUSTED.json
-
-# View results in HyPhy Vision (http://vision.hyphy.org)
+  --output "${RESULTS}/${GENE_NAME}_BUSTED.json"
 
 echo "Pipeline completed successfully."
 echo "Results saved in: ${RESULTS}"
+echo "View results in HyPhy Vision: http://vision.hyphy.org"
